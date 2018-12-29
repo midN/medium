@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Mappings:
+  ec2:
+    ips:
+      eni_ip: 10.10.0.10
+      master_server_ip: 10.10.0.20
+      slave_server_ip: 10.10.0.30
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vpn
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: vpn
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:AssignPrivateIpAddresses'
+                  - 'ec2:DetachNetworkInterface'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:AttachNetworkInterface'
+                  - 'ssm:*'
+                  - 'ssmmessages:*'
+                  - 'ec2messages:*'
+                Resource: '*'
+
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Role
+
+  Eni:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SourceDestCheck: false
+      GroupSet: REPLACE_ME
+      SubnetId: REPLACE_ME
+      PrivateIpAddress: !FindInMap [ec2, ips, eni_ip]
+
+  Eip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  EipAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt Eip.AllocationId
+      NetworkInterfaceId: !Ref Eni
+
+  EC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: REPLACE_ME
+      InstanceType: REPLACE_ME
+      IamInstanceProfile: !Ref Profile
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet: REPLACE_ME
+          SubnetId: REPLACE_ME
+          PrivateIpAddress: !FindInMap [ec2, ips, master_server_ip]
+      Tags:
+        - Key: Name
+          Value: vpn
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              export AWS_DEFAULT_REGION="us-east-1"
+              instance_id=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+              aws s3 cp s3://REPLACE_ME/userdata.sh /tmp/userdata.sh
+              chmod +x /tmp/userdata.sh
+              sh /tmp/userdata.sh
+
+              # Keepalived
+              aws s3 cp s3://REPLACE_ME/eni.sh /opt/eni.sh
+              cat > /opt/vpn.sh << EOL
+              #!/bin/bash
+              TYPE=\$1
+              NAME=\$2
+              STATE=\$3
+              case \$STATE in
+                      "MASTER") sh /opt/eni.sh ${Eni} ${secondaryIp} | logger; /usr/sbin/service strongswan restart
+                                ;;
+                      "BACKUP") /usr/sbin/service strongswan stop
+                                ;;
+                      "FAULT")  /usr/sbin/service strongswan stop
+                                exit 0
+                                ;;
+                      *)        /sbin/logger "ipsec unknown state"
+                                exit 1
+                                ;;
+              esac
+              EOL
+              chmod +x /opt/vpn.sh
+
+              yum install -y keepalived
+              cat > /etc/keepalived/keepalived.conf << EOL
+              vrrp_instance STRONGSWAN {
+                state MASTER
+                interface eth0
+                virtual_router_id 51
+                priority 150
+                unicast_src_ip ${masterIp}
+                unicast_peer {
+                  ${slaveIp}
+                }
+                notify /opt/vpn.sh
+              }
+              EOL
+
+              sh /opt/eni.sh ${Eni} ${secondaryIp}
+
+              systemctl enable keepalived
+              systemctl start keepalived
+
+              # Disable SELINUX
+              sed -i 's/^SELINUX=.*$/SELINUX=disabled/g' /etc/selinux/config
+              shutdown -r now
+            - {
+              masterIp: !FindInMap [ec2, ips, master_server_ip],
+              slaveIp: !FindInMap [ec2, ips, slave_server_ip],
+              secondaryIp: !FindInMap [ec2, ips, eni_ip]
+              }
+
+  SlaveEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: REPLACE_ME
+      InstanceType: REPLACE_ME
+      IamInstanceProfile: !Ref Profile
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet: REPLACE_ME
+          SubnetId: REPLACE_ME
+          PrivateIpAddress: !FindInMap [ec2, ips, slave_server_ip]
+      Tags:
+        - Key: Name
+          Value: vpn-slave
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              export AWS_DEFAULT_REGION="us-east-1"
+              instance_id=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+              aws s3 cp s3://REPLACE_ME/userdata.sh /tmp/userdata.sh
+              chmod +x /tmp/userdata.sh
+              sh /tmp/userdata.sh
+
+              # Keepalived
+              aws s3 cp s3://REPLACE_ME/eni.sh /opt/eni.sh
+              cat > /opt/vpn.sh << EOL
+              #!/bin/bash
+              TYPE=\$1
+              NAME=\$2
+              STATE=\$3
+              case \$STATE in
+                      "MASTER") sh /opt/eni.sh ${Eni} ${secondaryIp} | logger; /usr/sbin/service strongswan restart
+                                ;;
+                      "BACKUP") /usr/sbin/service strongswan stop
+                                ;;
+                      "FAULT")  /usr/sbin/service strongswan stop
+                                exit 0
+                                ;;
+                      *)        /sbin/logger "ipsec unknown state"
+                                exit 1
+                                ;;
+              esac
+              EOL
+              chmod +x /opt/vpn.sh
+
+              yum install -y keepalived
+              cat > /etc/keepalived/keepalived.conf << EOL
+              vrrp_instance STRONGSWAN {
+                state BACKUP
+                interface eth0
+                virtual_router_id 51
+                priority 100
+                unicast_src_ip ${slaveIp}
+                unicast_peer {
+                  ${masterIp}
+                }
+                notify /opt/vpn.sh
+              }
+              EOL
+
+              systemctl enable keepalived
+              systemctl start keepalived
+
+              # Disable SELINUX
+              sed -i 's/^SELINUX=.*$/SELINUX=disabled/g' /etc/selinux/config
+              shutdown -r now
+            - {
+              masterIp: !FindInMap [ec2, ips, master_server_ip],
+              slaveIp: !FindInMap [ec2, ips, slave_server_ip],
+              secondaryIp: !FindInMap [ec2, ips, eni_ip]
+              }

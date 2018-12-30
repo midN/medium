@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  vpcId:
+    Type: AWS::EC2::VPC::Id
+  subnet:
+    Type: AWS::EC2::Subnet::Id
+  zone:
+    Type: AWS::Route53::HostedZone::Id
+Resources:
+  lb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref subnet
+  tg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref vpcId
+  http:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref lb
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref tg
+      Port: 80
+      Protocol: HTTP
+  td:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: nginx
+          Image: nginx:latest
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+  cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: cluster
+  ecs:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref cluster
+      DesiredCount: 1
+      TaskDefinition: !Ref td
+      ServiceName: service
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          LoadBalancerName: !Ref lb
+  lc:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      # us-east-1 ecs-optimized: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
+      ImageId: ami-045f1b3f87ed83659
+      InstanceType: t3.nano
+      UserData:
+        !Base64
+          "Fn::Sub": |
+            #!/bin/bash
+            echo ECS_CLUSTER=cluster >> /etc/ecs/ecs.config
+  ag:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: 1
+      LaunchConfigurationName: !Ref lc
+    DependsOn:
+      - cluster
+  cname:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: yourapp
+      Type: "CNAME"
+      HostedZoneId: !Ref zone
+      ResourceRecords:
+        - !Ref lb
+  rgroup:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref zone
+      RecordSets:
+        - Name: yourapp
+          Type: CNAME
+          SetIdentifier: ECS
+          Weight: '9'
+          ResourceRecords:
+            - !Ref lb
+        - Name: yourapp
+          Type: CNAME
+          SetIdentifier: EKS
+          Weight: '1'
+          ResourceRecords:
+            - !Ref eks_lb

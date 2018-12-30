@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  vpcId:
+    Type: AWS::EC2::VPC::Id
+  subnet:
+    Type: AWS::EC2::Subnet::Id
+  zone:
+    Type: AWS::Route53::HostedZone::Id
+  cluster:
+    Type: String
+Resources:
+  role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - eks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  eks:
+    Type: AWS::EKS::Cluster
+    Properties:
+      ResourcesVpcConfig:
+        SubnetIds: [!Ref subnet]
+      RoleArn: !Ref role
+  lc:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      # us-east-1 eks-optimized
+      ImageId: ami-0b4eb1d8782fc3aea
+      InstanceType: t3.nano
+      UserData:
+        !Base64
+          "Fn::Sub": |
+            #!/bin/bash
+            set -o xtrace
+            /etc/eks/bootstrap.sh ${cluster}
+            /opt/aws/bin/cfn-signal --exit-code $? \
+                     --stack  ${AWS::StackName} \
+                     --resource NodeGroup  \
+                     --region ${AWS::Region}
+  ag:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: 1
+      LaunchConfigurationName: !Ref lc
